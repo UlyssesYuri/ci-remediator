@@ -1,0 +1,16 @@
+{
+  "action": "completed",
+  "repository": {
+    "full_name": "gavinnhh/agent-demo-inventory",
+    "clone_url": "https://github.com/gavinnhh/agent-demo-inventory.git"
+  },
+  "workflow_run": {
+    "id": 18234567890,
+    "head_sha": "9f8c2e1a4b6d7c3e5f0a1b2c3d4e5f6a7b8c9d0e",
+    "head_branch": "main",
+    "html_url": "https://github.com/gavinnhh/agent-demo-inventory/actions/runs/18234567890",
+    "path": ".github/workflows/ci.yml",
+    "conclusion": "failure",
+    "logs_url": "https://api.github.com/repos/gavinnhh/agent-demo-inventory/actions/runs/18234567890/logs"
+  }
+}

@@ -3,3 +3,7 @@ uvicorn==0.34.0
 pydantic==2.10.6
 pytest==8.3.4
 httpx==0.28.1
+sqlalchemy==2.0.41
+psycopg[binary]==3.2.9
+boto3==1.40.61
+moto[sqs]==5.1.15

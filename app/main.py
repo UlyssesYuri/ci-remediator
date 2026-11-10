@@ -1,11 +1,23 @@
 import json
-from uuid import uuid4
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 
-app = FastAPI()
+from app.db import database_url, init_db
+from app.runs import mark_enqueued, persist_run
+from app.sqs import queue_url, send_message
 
 _TERMINAL_CONCLUSIONS = {"failure", "timed_out", "startup_failure"}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if database_url() is not None:
+        init_db()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/health")
@@ -29,8 +41,27 @@ async def webhook(request: Request) -> dict[str, bool]:
     if run is None:
         return {"accepted": True}
 
-    row = persist_run(run)
-    enqueue_run(row)
+    try:
+        row = persist_run(run)
+    except Exception as exc:
+        print(
+            f"WARNING: persist failed; event accepted and not stored: {exc}",
+            flush=True,
+        )
+        return {"accepted": True}
+
+    if row.get("sqs_message_id"):
+        return {"accepted": True}
+
+    try:
+        message_id = enqueue_run(row)
+        if message_id:
+            mark_enqueued(row["run_id"], message_id)
+    except Exception as exc:
+        print(
+            f"WARNING: SendMessage failed; event accepted and not queued: {exc}",
+            flush=True,
+        )
     return {"accepted": True}
 
 
@@ -63,19 +94,9 @@ def extract_run(payload: dict) -> dict | None:
     }
 
 
-def persist_run(run: dict) -> dict:
-    """Placeholder until real Postgres exists. Builds the row only."""
+def queue_body(row: dict) -> dict:
+    """What the worker needs. status and sqs_message_id stay on the row."""
     return {
-        "run_id": str(uuid4()),
-        "status": "queued",
-        "log_s3_key": None,
-        **run,
-    }
-
-
-def enqueue_run(row: dict) -> None:
-    """Placeholder until real SQS exists. Prints the message only."""
-    message = {
         "run_id": row["run_id"],
         "full_name": row["full_name"],
         "clone_url": row["clone_url"],
@@ -87,4 +108,17 @@ def enqueue_run(row: dict) -> None:
         "conclusion": row["conclusion"],
         "logs_url": row["logs_url"],
     }
-    print(json.dumps(message), flush=True)
+
+
+def enqueue_run(row: dict) -> str | None:
+    body = json.dumps(queue_body(row))
+    if not queue_url():
+        print(
+            "WARNING: SQS_QUEUE_URL is not set; message was not sent",
+            flush=True,
+        )
+        print(body, flush=True)
+        return None
+    message_id = send_message(body)
+    print(body, flush=True)
+    return message_id

@@ -1,3 +1,4 @@
+import itertools
 import json
 import socket
 import sys
@@ -6,12 +7,21 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 
+import app.main as main_module
 from app.main import app
 
 client = TestClient(app)
 
+_run_id_counter = itertools.count(1000)
 
-def _payload(action: str, conclusion: str | None) -> dict:
+
+def _next_run_id() -> int:
+    return next(_run_id_counter)
+
+
+def _payload(action: str, conclusion: str | None, run_id: int | None = None) -> dict:
+    if run_id is None:
+        run_id = _next_run_id()
     return {
         "action": action,
         "repository": {
@@ -19,13 +29,13 @@ def _payload(action: str, conclusion: str | None) -> dict:
             "clone_url": "https://github.com/acme/app.git",
         },
         "workflow_run": {
-            "id": 123,
+            "id": run_id,
             "head_sha": "abc123",
             "head_branch": "main",
             "conclusion": conclusion,
-            "html_url": "https://github.com/acme/app/actions/runs/123",
+            "html_url": f"https://github.com/acme/app/actions/runs/{run_id}",
             "path": ".github/workflows/ci.yml",
-            "logs_url": "https://api.github.com/repos/acme/app/actions/runs/123/logs",
+            "logs_url": f"https://api.github.com/repos/acme/app/actions/runs/{run_id}/logs",
         },
     }
 
@@ -82,10 +92,9 @@ def test_completed_failure_is_accepted_and_enqueues(
     assert "status" not in message
     assert message["full_name"] == "acme/app"
     assert message["clone_url"] == "https://github.com/acme/app.git"
-    assert message["github_run_id"] == 123
     assert message["head_sha"] == "abc123"
     assert message["head_branch"] == "main"
-    assert message["html_url"].endswith("/123")
+    assert message["html_url"].endswith(str(message["github_run_id"]))
     assert message["workflow_path"] == ".github/workflows/ci.yml"
     assert message["conclusion"] == "failure"
     assert message["logs_url"].endswith("/logs")
@@ -115,6 +124,77 @@ def test_push_event_prints_nothing(capsys: pytest.CaptureFixture[str]) -> None:
     assert response.status_code == 200
     assert response.json() == {"accepted": True}
     assert capsys.readouterr().out == ""
+
+
+def test_repeat_delivery_sends_once(capsys: pytest.CaptureFixture[str]) -> None:
+    payload = _payload("completed", "failure")
+
+    first = client.post("/webhook", json=payload)
+    second = client.post("/webhook", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    out = capsys.readouterr().out.strip()
+    lines = [line for line in out.splitlines() if line]
+    assert len(lines) == 1
+
+
+def test_missing_queue_url_warns_and_prints_body(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("SQS_QUEUE_URL", raising=False)
+
+    response = client.post("/webhook", json=_payload("completed", "failure"))
+    assert response.status_code == 200
+
+    out = capsys.readouterr().out.strip()
+    lines = out.splitlines()
+    assert lines[0] == "WARNING: SQS_QUEUE_URL is not set; message was not sent"
+    body = json.loads(lines[-1])
+    assert "status" not in body
+
+
+def test_persist_failure_warns_and_does_not_enqueue(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _raise(_run: dict) -> dict:
+        raise RuntimeError("rds down")
+
+    monkeypatch.setattr(main_module, "persist_run", _raise)
+
+    response = client.post("/webhook", json=_payload("completed", "failure"))
+    assert response.status_code == 200
+
+    out = capsys.readouterr().out
+    assert "WARNING: persist failed" in out
+    assert not any(line.startswith("{") for line in out.splitlines())
+
+
+def test_enqueue_failure_is_retried_on_redelivery(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    real_enqueue_run = main_module.enqueue_run
+    calls = {"n": 0}
+
+    def _flaky(row: dict):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("send failed")
+        return real_enqueue_run(row)
+
+    monkeypatch.setattr(main_module, "enqueue_run", _flaky)
+
+    payload = _payload("completed", "failure")
+    first = client.post("/webhook", json=payload)
+    second = client.post("/webhook", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+    out = capsys.readouterr().out
+    assert "WARNING: SendMessage failed" in out
+    assert sum(1 for line in out.splitlines() if line.startswith("{")) == 1
 
 
 @pytest.mark.skipif(
