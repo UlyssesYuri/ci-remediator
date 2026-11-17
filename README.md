@@ -86,3 +86,35 @@ Every failure path still returns 200, with a warning in the logs:
 | `SQS_QUEUE_URL` unset | not-set warning + the body | `sqs_message_id` null | set the variable, then Redeliver |
 | `SendMessage` fails | `WARNING: SendMessage failed` | `sqs_message_id` null | Redeliver — the next delivery sends |
 | Sent | the body | `sqs_message_id` set | done, waiting for a worker |
+
+## Worker
+
+Run from the repo root with `.env` sourced:
+
+```bash
+set -a && source .env && set +a
+python -m worker.sqs_worker
+```
+
+The worker long-polls SQS one message at a time. For each one it downloads
+`logs_url` once and stores the zip in `AWS_S3_BUCKET`, then runs a LangGraph
+agent: it clones `clone_url` at `head_sha`, runs `claude -p` to edit the
+code, runs the repo's allowlisted test command, and retries up to three
+times. A passing fix opens one pull request, ready for review; three
+failures (or a passing gate with no edit) set the run to `needs_manual`.
+It never merges. The message is deleted only after the graph returns
+without raising — a crash or an infrastructure error leaves it on the
+queue to retry.
+
+Worker-only variables (the API on Railway never reads these):
+
+| Variable | Value |
+|---|---|
+| `DATABASE_URL`, `AWS_REGION`, `SQS_QUEUE_URL` | Same as Railway |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` | A key that can receive/delete on the queue and read/write the bucket |
+| `AWS_S3_BUCKET` | The log bucket name |
+| `GITHUB_TOKEN` | Fine-grained PAT: Actions read, Contents read/write, Pull requests read/write |
+| `ANTHROPIC_API_KEY` | For `claude -p` |
+
+A missing database or queue is a warning, not a crash — the worker retries
+every 20 seconds instead of exiting.

@@ -79,6 +79,19 @@ def _public_row(run: Run, *, created: bool) -> dict:
     }
 
 
+def get_run(run_id: str) -> dict:
+    with session_scope() as session:
+        row = session.get(Run, run_id)
+        if row is None:
+            raise LookupError(run_id)
+        return {
+            "run_id": row.id,
+            "status": row.status,
+            "log_s3_key": row.log_s3_key,
+            "pr_url": row.pr_url,
+        }
+
+
 def mark_enqueued(run_id: str, message_id: str) -> None:
     with session_scope() as session:
         row = session.get(Run, run_id)
@@ -106,6 +119,7 @@ def set_log_s3_key(run_id: str, log_s3_key: str) -> None:
 
 
 def set_pr_url(run_id: str, pr_url: str) -> None:
+    # Opening the PR ends the run: it is always ready for review, never a draft.
     with session_scope() as session:
         row = session.get(Run, run_id)
         if row is None:
